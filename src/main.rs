@@ -1,129 +1,206 @@
-extern crate regex;
 extern crate chrono;
 
 use std::io::Read;
-use regex::Regex;
 use chrono::TimeZone;
-use std::io::Write;
 use chrono::Timelike;
 use chrono::Datelike;
 
-// const BUF_SIZE: usize = 1024 * 1024;
-const BUF_SIZE: usize = 25;
+const BUF_SIZE: usize = 1024 * 1024;
 
 const POWERS_OF_10: [u64; 10] =
     [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000];
 
+#[derive(PartialEq, Eq)]
+enum State {
+    Hunting,
+    Skipping,
+    MatchStarted,
+    Matching,
+    Finished,
+}
+
 fn main() -> std::io::Result<()> {
-    let pattern = Regex::new(r"\b1[45][0-9]{8,17}\b").expect("timestamp regex should be valid");
-
-    let mut buffer: [u8; BUF_SIZE] = [0; BUF_SIZE];
-
     // raw stdin has an 8k buffer
     let shared_stdin = std::io::stdin();
-    let mut stdin = shared_stdin.lock();
+    let raw_stdin = shared_stdin.lock();
+    let mut stdin = std::io::BufReader::with_capacity(BUF_SIZE, raw_stdin).bytes();
 
     // raw stdout has a line buffer, which flushes after every newline
     let shared_stdout = std::io::stdout();
     let raw_stdout = shared_stdout.lock();
     let mut stdout = std::io::BufWriter::with_capacity(BUF_SIZE, raw_stdout);
 
-    // TODO use a Vec<u8> as the buffer, should make a lot of this simpler
+    let mut state = State::Hunting;
+    let mut buffer = Vec::with_capacity(19);
 
-    let mut leftover = 0;
-    loop {
-        let bytes_read = stdin.read(&mut buffer[leftover..])?;
-        if bytes_read == 0 {
-            if leftover == 0 {
-                return Ok(());
-            } else {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                               "input ends with an incomplete UTF8 sequence"));
+    while state != State::Finished {
+        state = match stdin.next() {
+            Some(Ok(ch)) if ch >= '0' as u8 && ch <= '9' as u8 => {
+                // digit
+
+                match state {
+                    State::Hunting => {
+                        if ch == '1' as u8 {
+                            State::MatchStarted
+                        } else {
+                            emit(&mut stdout, ch)?;
+                            State::Skipping
+                        }
+                    }
+                    State::Skipping => {
+                        emit(&mut stdout, ch)?;
+                        State::Skipping
+                    }
+                    State::MatchStarted => {
+                        if ch == '4' as u8 || ch == '5' as u8 {
+                            buffer.push('1' as u8);
+                            buffer.push(ch);
+                            State::Matching
+                        } else {
+                            emit(&mut stdout, '1' as u8)?;
+                            emit(&mut stdout, ch)?;
+                            State::Skipping
+                        }
+                    }
+                    State::Matching => {
+                        if buffer.len() < buffer.capacity() {
+                            buffer.push(ch);
+                            State::Matching
+                        } else {
+                            emit_buffer(&mut stdout, &mut buffer)?;
+                            State::Skipping
+                        }
+                    }
+                    State::Finished => {
+                        panic!("unreachable");
+                    }
+                }
+            }
+            Some(Ok(ch)) => {
+                // non-digit
+
+                match state {
+                    State::Hunting => {
+                        emit(&mut stdout, ch)?;
+                        State::Hunting
+                    }
+                    State::Skipping => {
+                        emit(&mut stdout, ch)?;
+                        State::Hunting
+                    }
+                    State::MatchStarted => {
+                        emit(&mut stdout, '1' as u8)?;
+                        emit(&mut stdout, ch)?;
+                        State::Hunting
+                    }
+                    State::Matching => {
+                        emit_date_or_buffer(&mut stdout, &mut buffer)?;
+                        emit(&mut stdout, ch)?;
+                        State::Hunting
+                    }
+                    State::Finished => {
+                        panic!("unreachable");
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                // IO error!
+
+                return Err(e);
+            }
+            None => {
+                // end of file
+
+                match state {
+                    State::Hunting => State::Finished,
+                    State::Skipping => State::Finished,
+                    State::MatchStarted => {
+                        emit(&mut stdout, '1' as u8)?;
+                        State::Finished
+                    }
+                    State::Matching => {
+                        emit_date_or_buffer(&mut stdout, &mut buffer)?;
+                        State::Finished
+                    }
+                    State::Finished => {
+                        panic!("unreachable");
+                    }
+                }
             }
         };
+    }
 
-        let buffer_size = leftover + bytes_read;
+    assert!(buffer.is_empty());
 
-        let haystack_size: usize;
-        {
-            // TODO use unchecked from_utf8 in rescue
-            let mut haystack = std::str::from_utf8(&buffer[..buffer_size]).or_else(|e| if e.error_len().is_none() {
-                             std::str::from_utf8(&buffer[..e.valid_up_to()])
-                         } else {
-                             Err(e)
-                         })
-                .map_err(to_io_error)?;
+    Ok(())
+}
 
-            // make sure the haystack does not end with digits - defer those to the next block
-            while haystack.len() > 0 &&
-                  haystack.get(haystack.len() - 1..haystack.len())
-                      .map(|s| {
-                               s.chars()
-                                   .next()
-                                   .expect("nonempty string should have a first character")
-                                   .is_digit(10)
-                           })
-                      .unwrap_or(false) {
-                haystack = &haystack[..haystack.len() - 1];
-            }
-
-            if haystack.is_empty() {
-                // should treat the last max_timestamp_len + 1 as leftovers and output the rest
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                                               "input contains an entire buffer's worth of digits, which is too much"));
-            }
-
-            haystack_size = haystack.len();
-
-            let mut prev_end = 0;
-            for found in pattern.find_iter(haystack) {
-                let fractional_seconds_digits = found.as_str().len() - 10;
-                let scale = POWERS_OF_10[fractional_seconds_digits];
-
-                let timestamp: u64 =
-                found.as_str().parse().expect("sequence of digits should be parseable as integer");
-
-                let time = chrono::Utc.timestamp((timestamp / scale) as i64,
-                                                 (timestamp % scale) as u32);
-
-                stdout.write(&haystack[prev_end..found.start()].as_bytes())?;
-
-                if fractional_seconds_digits == 0 {
-                    write!(stdout,
-                           "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                           time.year(),
-                           time.month(),
-                           time.day(),
-                           time.hour(),
-                           time.minute(),
-                           time.second());
-                } else {
-                    write!(stdout,
-                           "{}-{:02}-{:02}T{:02}:{:02}:{:02}.{:0width$}Z",
-                           time.year(),
-                           time.month(),
-                           time.day(),
-                           time.hour(),
-                           time.minute(),
-                           time.second(),
-                           time.nanosecond(),
-                           width = fractional_seconds_digits);
-                }
-
-                prev_end = found.end();
-            }
-            stdout.write(&haystack[prev_end..haystack.len()].as_bytes())?;
-        }
-
-        leftover = buffer_size - haystack_size;
-        if leftover > 0 {
-            for i in 0..leftover {
-                buffer[i] = buffer[haystack_size + i];
-            }
-        }
+fn emit_date_or_buffer(out: &mut impl std::io::Write, buffer: &mut Vec<u8>) -> std::io::Result<()> {
+    if buffer.len() >= 10 {
+        emit_date(out, buffer)
+    } else {
+        emit_buffer(out, buffer)
     }
 }
 
-fn to_io_error(e: std::str::Utf8Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+fn emit_date(out: &mut impl std::io::Write, buffer: &mut Vec<u8>) -> std::io::Result<()> {
+    let fractional_seconds_digits = buffer.len() - 10;
+    let scale = POWERS_OF_10[fractional_seconds_digits];
+
+    let mut timestamp: u64 = 0;
+    for d in buffer.iter() {
+        assert!((*d as char).is_digit(10),
+                "{} is not a digit (in {:?})",
+                *d,
+                buffer);
+        timestamp = timestamp * 10 + (*d - '0' as u8) as u64;
+    }
+
+    let time = chrono::Utc.timestamp((timestamp / scale) as i64, (timestamp % scale) as u32);
+
+    if fractional_seconds_digits == 0 {
+        write!(out,
+               "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+               time.year(),
+               time.month(),
+               time.day(),
+               time.hour(),
+               time.minute(),
+               time.second());
+    } else {
+        write!(out,
+               "{}-{:02}-{:02}T{:02}:{:02}:{:02}.{:0width$}Z",
+               time.year(),
+               time.month(),
+               time.day(),
+               time.hour(),
+               time.minute(),
+               time.second(),
+               time.nanosecond(),
+               width = fractional_seconds_digits);
+    }
+
+    buffer.clear();
+
+    Ok(())
+}
+
+fn emit_buffer(out: &mut impl std::io::Write, buffer: &mut Vec<u8>) -> std::io::Result<()> {
+    for d in buffer.into_iter() {
+        emit(out, *d)?;
+    }
+
+    buffer.clear();
+
+    Ok(())
+}
+
+fn emit(out: &mut impl std::io::Write, ch: u8) -> std::io::Result<()> {
+    let written = out.write(&[ch])?;
+
+    if written == 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "output refused write"));
+    }
+
+    Ok(())
 }
