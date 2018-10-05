@@ -7,6 +7,8 @@ use chrono::Datelike;
 
 const BUF_SIZE: usize = 1024 * 1024;
 
+const MAX_TIMESTAMP_LENGTH: usize = 19; // 1538670663000000000 ns
+
 const POWERS_OF_10: [u64; 10] =
     [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000];
 
@@ -29,93 +31,76 @@ fn main() -> std::io::Result<()> {
     let raw_stdout = shared_stdout.lock();
     let mut stdout = std::io::BufWriter::with_capacity(BUF_SIZE, raw_stdout);
 
+    let mut buffer = Vec::with_capacity(MAX_TIMESTAMP_LENGTH);
+
     let mut state = Some(State::Hunting);
-    let mut buffer = Vec::with_capacity(19);
-
     while state.is_some() {
-        state = match stdin.next() {
-            Some(Ok(ch)) if is_digit(ch) => {
-                // digit
-
-                match state.expect("state should exist while running") {
-                    State::Hunting => {
-                        if is_match_start(ch) {
-                            Some(State::MatchStarted)
-                        } else {
-                            emit(&mut stdout, ch)?;
-                            Some(State::Skipping)
-                        }
-                    }
-                    State::Skipping => {
-                        emit(&mut stdout, ch)?;
-                        Some(State::Skipping)
-                    }
-                    State::MatchStarted => {
-                        if is_match_continuation(ch) {
-                            buffer.push('1' as u8);
-                            buffer.push(ch);
-                            Some(State::Matching)
-                        } else {
-                            emit(&mut stdout, '1' as u8)?;
-                            emit(&mut stdout, ch)?;
-                            Some(State::Skipping)
-                        }
-                    }
-                    State::Matching => {
-                        if buffer.len() < buffer.capacity() {
-                            buffer.push(ch);
-                            Some(State::Matching)
-                        } else {
-                            emit_buffer(&mut stdout, &mut buffer)?;
-                            Some(State::Skipping)
-                        }
-                    }
+        state = match (state.expect("state should exist while running"), stdin.next()) {
+            // digit
+            (State::Hunting, Some(Ok(ch))) if is_match_start(ch) => Some(State::MatchStarted),
+            (State::Hunting, Some(Ok(ch))) if is_digit(ch) => {
+                emit(&mut stdout, ch)?;
+                Some(State::Skipping)
+            }
+            (State::Skipping, Some(Ok(ch))) if is_digit(ch) => {
+                emit(&mut stdout, ch)?;
+                Some(State::Skipping)
+            }
+            (State::MatchStarted, Some(Ok(ch))) if is_match_continuation(ch) => {
+                buffer.push('1' as u8);
+                buffer.push(ch);
+                Some(State::Matching)
+            }
+            (State::MatchStarted, Some(Ok(ch))) if is_digit(ch) => {
+                emit(&mut stdout, '1' as u8)?;
+                emit(&mut stdout, ch)?;
+                Some(State::Skipping)
+            }
+            (State::Matching, Some(Ok(ch))) if is_digit(ch) => {
+                if buffer.len() < buffer.capacity() {
+                    buffer.push(ch);
+                    Some(State::Matching)
+                } else {
+                    emit_buffer(&mut stdout, &mut buffer)?;
+                    Some(State::Skipping)
                 }
             }
-            Some(Ok(ch)) => {
-                // non-digit
 
-                match state.expect("state should exist while running") {
-                    State::Hunting => {
-                        emit(&mut stdout, ch)?;
-                        Some(State::Hunting)
-                    }
-                    State::Skipping => {
-                        emit(&mut stdout, ch)?;
-                        Some(State::Hunting)
-                    }
-                    State::MatchStarted => {
-                        emit(&mut stdout, '1' as u8)?;
-                        emit(&mut stdout, ch)?;
-                        Some(State::Hunting)
-                    }
-                    State::Matching => {
-                        emit_date_or_buffer(&mut stdout, &mut buffer)?;
-                        emit(&mut stdout, ch)?;
-                        Some(State::Hunting)
-                    }
-                }
+            // not a digit
+            (State::Hunting, Some(Ok(ch))) => {
+                emit(&mut stdout, ch)?;
+                Some(State::Hunting)
             }
-            Some(Err(e)) => {
-                // IO error!
+            (State::Skipping, Some(Ok(ch))) => {
+                emit(&mut stdout, ch)?;
+                Some(State::Hunting)
+            }
+            (State::MatchStarted, Some(Ok(ch))) => {
+                emit(&mut stdout, '1' as u8)?;
+                emit(&mut stdout, ch)?;
+                Some(State::Hunting)
+            }
+            (State::Matching, Some(Ok(ch))) => {
+                emit_date_or_buffer(&mut stdout, &mut buffer)?;
+                emit(&mut stdout, ch)?;
+                Some(State::Hunting)
+            }
 
+            // IO error!
+            (_, Some(Err(e))) => {
                 return Err(e);
             }
-            None => {
-                // end of file
 
-                match state.expect("state should exist while running") {
-                    State::Hunting => None,
-                    State::Skipping => None,
-                    State::MatchStarted => {
-                        emit(&mut stdout, '1' as u8)?;
-                        None
-                    }
-                    State::Matching => {
-                        emit_date_or_buffer(&mut stdout, &mut buffer)?;
-                        None
-                    }
-                }
+            // end of file
+            (State::Hunting, None) => None,
+            (State::Skipping, None) => None,
+            (State::MatchStarted, None) => {
+                emit(&mut stdout, '1' as u8)?;
+                None
+            }
+            (State::Matching, None) => {
+                emit_date_or_buffer(&mut stdout, &mut buffer)?;
+                None
             }
         };
     }
@@ -134,7 +119,7 @@ fn is_match_start(ch: u8) -> bool {
 }
 
 fn is_match_continuation(ch: u8) -> bool {
-    ch == '4' as u8 || ch == '5' as u8
+    ch == '4' as u8 || ch == '5' as u8 // 2014-05-13 16:53:20 to 2020-09-13 12:26:40 (not inclusive)
 }
 
 fn emit_date_or_buffer(out: &mut impl std::io::Write, buffer: &mut Vec<u8>) -> std::io::Result<()> {
