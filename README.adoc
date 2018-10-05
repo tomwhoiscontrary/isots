@@ -1,0 +1,5 @@
+This is a simple and somewhat silly utility which looks for digit strings which might be unix timestamps (counts of time since the unix epoch) and rewrites them as ISO 8601 date-time strings.
+
+A digit string is considered to be a unix timestamp if it starts with a 1 followed by a 4 or 5, and has 10 to 19 digits. That corresponds to a range of time from 2014-05-13 16:53:20 to 2020-09-13 12:26:40 (not inclusive), with precision of seconds to nanoseconds.
+
+Input is accepted on standard input, and written to standard output. Date-time strings are always in UTC.
