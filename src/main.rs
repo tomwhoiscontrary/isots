@@ -16,7 +16,6 @@ enum State {
     Skipping,
     MatchStarted,
     Matching,
-    Finished,
 }
 
 fn main() -> std::io::Result<()> {
@@ -30,76 +29,70 @@ fn main() -> std::io::Result<()> {
     let raw_stdout = shared_stdout.lock();
     let mut stdout = std::io::BufWriter::with_capacity(BUF_SIZE, raw_stdout);
 
-    let mut state = State::Hunting;
+    let mut state = Some(State::Hunting);
     let mut buffer = Vec::with_capacity(19);
 
-    while state != State::Finished {
+    while state.is_some() {
         state = match stdin.next() {
             Some(Ok(ch)) if ch >= '0' as u8 && ch <= '9' as u8 => {
                 // digit
 
-                match state {
+                match state.expect("state should exist while running") {
                     State::Hunting => {
                         if ch == '1' as u8 {
-                            State::MatchStarted
+                            Some(State::MatchStarted)
                         } else {
                             emit(&mut stdout, ch)?;
-                            State::Skipping
+                            Some(State::Skipping)
                         }
                     }
                     State::Skipping => {
                         emit(&mut stdout, ch)?;
-                        State::Skipping
+                        Some(State::Skipping)
                     }
                     State::MatchStarted => {
                         if ch == '4' as u8 || ch == '5' as u8 {
                             buffer.push('1' as u8);
                             buffer.push(ch);
-                            State::Matching
+                            Some(State::Matching)
                         } else {
                             emit(&mut stdout, '1' as u8)?;
                             emit(&mut stdout, ch)?;
-                            State::Skipping
+                            Some(State::Skipping)
                         }
                     }
                     State::Matching => {
                         if buffer.len() < buffer.capacity() {
                             buffer.push(ch);
-                            State::Matching
+                            Some(State::Matching)
                         } else {
                             emit_buffer(&mut stdout, &mut buffer)?;
-                            State::Skipping
+                            Some(State::Skipping)
                         }
-                    }
-                    State::Finished => {
-                        panic!("unreachable");
                     }
                 }
             }
             Some(Ok(ch)) => {
                 // non-digit
 
-                match state {
+                match state.expect("state should exist while running") {
                     State::Hunting => {
                         emit(&mut stdout, ch)?;
-                        State::Hunting
+                        Some(State::Hunting)
                     }
                     State::Skipping => {
                         emit(&mut stdout, ch)?;
-                        State::Hunting
+                        Some(State::Hunting)
                     }
                     State::MatchStarted => {
                         emit(&mut stdout, '1' as u8)?;
                         emit(&mut stdout, ch)?;
-                        State::Hunting
+                        Some(State::Hunting)
                     }
                     State::Matching => {
                         emit_date_or_buffer(&mut stdout, &mut buffer)?;
                         emit(&mut stdout, ch)?;
-                        State::Hunting
-                    }
-                    State::Finished => {
-                        panic!("unreachable");
+                        Some(State::Hunting)
                     }
                 }
             }
@@ -111,19 +104,16 @@ fn main() -> std::io::Result<()> {
             None => {
                 // end of file
 
-                match state {
-                    State::Hunting => State::Finished,
-                    State::Skipping => State::Finished,
+                match state.expect("state should exist while running") {
+                    State::Hunting => None,
+                    State::Skipping => None,
                     State::MatchStarted => {
                         emit(&mut stdout, '1' as u8)?;
-                        State::Finished
+                        None
                     }
                     State::Matching => {
                         emit_date_or_buffer(&mut stdout, &mut buffer)?;
-                        State::Finished
-                    }
-                    State::Finished => {
-                        panic!("unreachable");
+                        None
                     }
                 }
             }
