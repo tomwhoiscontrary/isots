@@ -34,12 +34,12 @@ fn main() -> std::io::Result<()> {
 
     while state.is_some() {
         state = match stdin.next() {
-            Some(Ok(ch)) if ch >= '0' as u8 && ch <= '9' as u8 => {
+            Some(Ok(ch)) if is_digit(ch) => {
                 // digit
 
                 match state.expect("state should exist while running") {
                     State::Hunting => {
-                        if ch == '1' as u8 {
+                        if is_match_start(ch) {
                             Some(State::MatchStarted)
                         } else {
                             emit(&mut stdout, ch)?;
@@ -51,7 +51,7 @@ fn main() -> std::io::Result<()> {
                         Some(State::Skipping)
                     }
                     State::MatchStarted => {
-                        if ch == '4' as u8 || ch == '5' as u8 {
+                        if is_match_continuation(ch) {
                             buffer.push('1' as u8);
                             buffer.push(ch);
                             Some(State::Matching)
@@ -123,6 +123,18 @@ fn main() -> std::io::Result<()> {
     assert!(buffer.is_empty());
 
     Ok(())
+}
+
+fn is_digit(ch: u8) -> bool {
+    ch >= '0' as u8 && ch <= '9' as u8
+}
+
+fn is_match_start(ch: u8) -> bool {
+    ch == '1' as u8
+}
+
+fn is_match_continuation(ch: u8) -> bool {
+    ch == '4' as u8 || ch == '5' as u8
 }
 
 fn emit_date_or_buffer(out: &mut impl std::io::Write, buffer: &mut Vec<u8>) -> std::io::Result<()> {
